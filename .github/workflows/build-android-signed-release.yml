@@ -22,8 +22,7 @@ jobs:
           distribution: temurin
           java-version: 17
 
-      # Detect where the Capacitor project lives
-      - name: Detect project directories
+      - name: Detect project directory
         shell: bash
         run: |
           set -e
@@ -33,17 +32,12 @@ jobs:
             echo "PROJECT_DIR=." >> $GITHUB_ENV
           else
             echo "ERROR: package.json not found in repo root or RMPM_Mobile_Capacitor/"
-            echo "Repo root contains:"
             ls -la
             exit 1
           fi
-
           echo "ANDROID_DIR=${PROJECT_DIR}/android" >> $GITHUB_ENV
-
           echo "Using PROJECT_DIR=$PROJECT_DIR"
           echo "Using ANDROID_DIR=$ANDROID_DIR"
-
-          test -f "${PROJECT_DIR}/package.json" || (echo "ERROR: package.json missing" && exit 1)
 
       - name: Install deps
         working-directory: ${{ env.PROJECT_DIR }}
@@ -57,7 +51,6 @@ jobs:
         working-directory: ${{ env.PROJECT_DIR }}
         run: npx cap sync android
 
-      # Restore keystore into android/app/ and write android/keystore.properties
       - name: Restore keystore + write keystore.properties
         shell: bash
         env:
@@ -76,94 +69,36 @@ jobs:
           test -d "$ANDROID_DIR" || (echo "ERROR: ANDROID_DIR not found: $ANDROID_DIR" && ls -la && exit 1)
           test -d "$ANDROID_DIR/app" || (echo "ERROR: $ANDROID_DIR/app not found" && ls -la "$ANDROID_DIR" && exit 1)
 
-          # Write keystore file
+          # Keystore file
           echo "$ANDROID_KEYSTORE_B64" | tr -d '\n' | base64 -d > "$ANDROID_DIR/app/rmpm-release.keystore"
           test -f "$ANDROID_DIR/app/rmpm-release.keystore"
 
-          # Write keystore.properties (NO heredoc, avoids YAML issues)
+          # keystore.properties (no heredoc = no YAML drama)
           printf "storeFile=app/rmpm-release.keystore\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n" \
             "$ANDROID_KEYSTORE_PASSWORD" "$ANDROID_KEY_ALIAS" "$ANDROID_KEY_PASSWORD" \
             > "$ANDROID_DIR/keystore.properties"
 
-          # Don’t leak secrets to logs:
+          # verify (hide secrets)
           sed -i 's/storePassword=.*/storePassword=***hidden***/' "$ANDROID_DIR/keystore.properties"
           sed -i 's/keyPassword=.*/keyPassword=***hidden***/' "$ANDROID_DIR/keystore.properties"
+          echo "keystore.properties written:"
           cat "$ANDROID_DIR/keystore.properties"
 
-      # Patch android/app/build.gradle to use keystore.properties if needed
-      - name: Ensure release signingConfig is enabled
-        shell: bash
-        run: |
-          set -e
-          APP_GRADLE="$ANDROID_DIR/app/build.gradle"
-          test -f "$APP_GRADLE" || (echo "ERROR: $APP_GRADLE not found" && exit 1)
-
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path("${APP_GRADLE}")
-          s = p.read_text(encoding="utf-8")
-
-          # Insert keystore.properties loader if missing
-          if "keystorePropertiesFile" not in s:
-              insert = """
-// --- Added by GitHub Actions for release signing ---
-def keystoreProperties = new Properties()
-def keystorePropertiesFile = rootProject.file("keystore.properties")
-if (keystorePropertiesFile.exists()) {
-    keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
-}
-// --- End added ---
-"""
-              # put it near top (after plugins/apply lines usually)
-              s = insert + "\n" + s
-
-          # Ensure signingConfigs { release { ... } } exists
-          if "signingConfigs" not in s or "release {" not in s[s.find("signingConfigs"):]:
-              # best-effort: add signingConfigs block inside android { ... }
-              if "android {" in s:
-                  idx = s.find("android {") + len("android {")
-                  add = """
-    signingConfigs {
-        release {
-            if (keystorePropertiesFile.exists()) {
-                storeFile file(keystoreProperties["storeFile"])
-                storePassword keystoreProperties["storePassword"]
-                keyAlias keystoreProperties["keyAlias"]
-                keyPassword keystoreProperties["keyPassword"]
-            }
-        }
-    }
-"""
-                  s = s[:idx] + add + s[idx:]
-
-          # Ensure buildTypes.release uses signingConfig release
-          if "buildTypes" in s and "signingConfig signingConfigs.release" not in s:
-              s = s.replace("release {", "release {\n            signingConfig signingConfigs.release", 1)
-
-          p.write_text(s, encoding="utf-8")
-          print("Patched:", p)
-          PY
-
-          echo "---- build.gradle (snippet) ----"
-          grep -n "keystorePropertiesFile\\|signingConfigs\\|signingConfig signingConfigs.release" -n "$APP_GRADLE" | head -n 80 || true
-
-      - name: Build SIGNED Release APK
+      - name: Build Release APK (SIGNED)
         working-directory: ${{ env.ANDROID_DIR }}
         run: ./gradlew clean assembleRelease
 
-      - name: List outputs
+      - name: Show APK outputs
         shell: bash
         run: |
           set -e
-          echo "APK outputs:"
+          echo "APK folder:"
           ls -la "$ANDROID_DIR/app/build/outputs/apk/release" || true
-          echo "AAB outputs:"
-          ls -la "$ANDROID_DIR/app/build/outputs/bundle/release" || true
+          echo "All APKs found:"
+          find "$ANDROID_DIR/app/build/outputs" -name "*.apk" -maxdepth 6 -print || true
 
-      - name: Upload Release APK/AAB
+      - name: Upload Release APK
         uses: actions/upload-artifact@v4
         with:
-          name: rmpm-release-artifacts
-          path: |
-            ${{ env.ANDROID_DIR }}/app/build/outputs/apk/release/*.apk
-            ${{ env.ANDROID_DIR }}/app/build/outputs/bundle/release/*.aab
+          name: rmpm-release-apk
+          path: ${{ env.ANDROID_DIR }}/app/build/outputs/apk/release/*.apk
