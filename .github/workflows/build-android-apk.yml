@@ -23,7 +23,7 @@ jobs:
 
       - name: Install deps
         working-directory: RMPM_Mobile_Capacitor
-        run: npm ci
+        run: npm install
 
       - name: Build web (optional)
         working-directory: RMPM_Mobile_Capacitor
