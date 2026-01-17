@@ -11,37 +11,39 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node 20
+      - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: npm
+          cache-dependency-path: RMPM_Mobile_Capacitor/package-lock.json
 
-      - name: Setup Java 17
+      - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
 
-      - name: Verify Capacitor project exists
-        shell: bash
+      - name: Verify project paths
         run: |
           set -e
-          test -f "RMPM_Mobile_Capacitor/package.json" || (echo "ERROR: RMPM_Mobile_Capacitor/package.json not found" && ls -la && exit 1)
+          echo "Repo root:"
+          ls -la
+          test -f "RMPM_Mobile_Capacitor/package.json" || (echo "ERROR: RMPM_Mobile_Capacitor/package.json not found" && exit 1)
 
       - name: Install deps
         working-directory: RMPM_Mobile_Capacitor
-        run: npm ci || npm install
+        run: npm ci
 
       - name: Ensure Android platform exists
         working-directory: RMPM_Mobile_Capacitor
         run: npx cap add android || echo "android already exists"
 
-      - name: Sync Capacitor (regenerates capacitor-android module)
+      - name: Sync Capacitor
         working-directory: RMPM_Mobile_Capacitor
         run: npx cap sync android
 
       - name: Restore keystore + write keystore.properties
-        shell: bash
         working-directory: RMPM_Mobile_Capacitor/android
         env:
           ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
@@ -50,13 +52,14 @@ jobs:
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
           set -e
-          test -n "$ANDROID_KEYSTORE_B64" || (echo "ERROR: ANDROID_KEYSTORE_B64 empty" && exit 1)
-          test -n "$ANDROID_KEYSTORE_PASSWORD" || (echo "ERROR: ANDROID_KEYSTORE_PASSWORD empty" && exit 1)
-          test -n "$ANDROID_KEY_ALIAS" || (echo "ERROR: ANDROID_KEY_ALIAS empty" && exit 1)
-          test -n "$ANDROID_KEY_PASSWORD" || (echo "ERROR: ANDROID_KEY_PASSWORD empty" && exit 1)
+
+          test -n "$ANDROID_KEYSTORE_B64" || (echo "ERROR: ANDROID_KEYSTORE_B64 is empty" && exit 1)
+          test -n "$ANDROID_KEYSTORE_PASSWORD" || (echo "ERROR: ANDROID_KEYSTORE_PASSWORD is empty" && exit 1)
+          test -n "$ANDROID_KEY_ALIAS" || (echo "ERROR: ANDROID_KEY_ALIAS is empty" && exit 1)
+          test -n "$ANDROID_KEY_PASSWORD" || (echo "ERROR: ANDROID_KEY_PASSWORD is empty" && exit 1)
 
           echo "$ANDROID_KEYSTORE_B64" | tr -d '\n\r' | base64 -d > app/rmpm-release.keystore
-          test -f app/rmpm-release.keystore
+          test -f app/rmpm-release.keystore || (echo "ERROR: keystore file not created" && exit 1)
 
           cat > keystore.properties <<EOF
           storeFile=rmpm-release.keystore
@@ -65,22 +68,83 @@ jobs:
           keyPassword=$ANDROID_KEY_PASSWORD
           EOF
 
-      - name: Make gradlew executable
+      - name: Patch app/build.gradle for release signing (safe)
         working-directory: RMPM_Mobile_Capacitor/android
-        run: chmod +x ./gradlew
+        run: |
+          set -e
+          python3 - <<'PY'
+          from pathlib import Path
 
-      - name: Build Release APK (SIGNED)
+          gradle = Path("app/build.gradle")
+          if not gradle.exists():
+            raise SystemExit("ERROR: app/build.gradle not found")
+
+          s = gradle.read_text(encoding="utf-8", errors="ignore")
+
+          # 1) Ensure keystore.properties loader exists
+          if "keystorePropertiesFile" not in s:
+            loader = """
+          // --- Added by GitHub Actions for release signing ---
+          def keystoreProperties = new Properties()
+          def keystorePropertiesFile = rootProject.file("keystore.properties")
+          if (keystorePropertiesFile.exists()) {
+              keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
+          }
+          // --- End added ---
+          """
+            s = loader.strip() + "\n\n" + s
+
+          # 2) Ensure signingConfigs { release { ... } } exists inside android { }
+          if "signingConfigs" not in s:
+            idx = s.find("android {")
+            if idx == -1:
+              raise SystemExit("ERROR: Could not find 'android {' in build.gradle")
+            insert_pos = idx + len("android {")
+            signing_block = """
+          
+              signingConfigs {
+                  release {
+                      if (keystorePropertiesFile.exists()) {
+                          storeFile file(keystoreProperties['storeFile'] ?: 'rmpm-release.keystore')
+                          storePassword keystoreProperties['storePassword']
+                          keyAlias keystoreProperties['keyAlias']
+                          keyPassword keystoreProperties['keyPassword']
+                      }
+                  }
+              }
+          """
+            s = s[:insert_pos] + signing_block + s[insert_pos:]
+
+          # 3) Ensure buildTypes.release uses signingConfig
+          if "buildTypes" in s and "signingConfig signingConfigs.release" not in s:
+            # crude but effective: inject inside "release {"
+            marker = "release {"
+            p = s.find(marker)
+            if p != -1:
+              p2 = p + len(marker)
+              s = s[:p2] + "\n            signingConfig signingConfigs.release" + s[p2:]
+
+          gradle.write_text(s, encoding="utf-8")
+          print("OK: build.gradle patched for signing")
+          PY
+
+      - name: Build SIGNED Release APK
         working-directory: RMPM_Mobile_Capacitor/android
-        run: ./gradlew clean :app:assembleRelease
+        run: |
+          set -e
+          chmod +x ./gradlew
+          ./gradlew clean assembleRelease
 
       - name: Show APK outputs
         working-directory: RMPM_Mobile_Capacitor/android
         run: |
+          set -e
           ls -la app/build/outputs/apk/release || true
-          find app/build/outputs -type f -name "*.apk" -print || true
+          ls -la app/build/outputs/bundle/release || true
 
-      - name: Upload Release APK
+      - name: Upload Signed Release APK
         uses: actions/upload-artifact@v4
         with:
           name: app-release-apk
-          path: RMPM_Mobile_Capacitor/android/app/build/outputs/apk/release/*.apk
+          path: |
+            RMPM_Mobile_Capacitor/android/app/build/outputs/apk/release/*.apk
