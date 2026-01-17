@@ -1,0 +1,52 @@
+name: Build Android APK (Signed Release)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Install deps
+        working-directory: RMPM_Mobile_Capacitor
+        run: npm install
+
+      - name: Sync Capacitor
+        working-directory: RMPM_Mobile_Capacitor
+        run: npx cap sync android
+
+      - name: Restore keystore + write keystore.properties
+        working-directory: RMPM_Mobile_Capacitor/android
+        run: |
+          echo "${{ secrets.ANDROID_KEYSTORE_B64 }}" | tr -d '\n' | base64 -d > rmpm-release.keystore
+          cat > keystore.properties <<EOF
+          storeFile=rmpm-release.keystore
+          storePassword=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          keyAlias=${{ secrets.ANDROID_KEY_ALIAS }}
+          keyPassword=${{ secrets.ANDROID_KEY_PASSWORD }}
+          EOF
+          ls -la
+
+      - name: Build Release APK
+        working-directory: RMPM_Mobile_Capacitor/android
+        run: ./gradlew assembleRelease
+
+      - name: Upload Release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release-apk
+          path: RMPM_Mobile_Capacitor/android/app/build/outputs/apk/release/*.apk
