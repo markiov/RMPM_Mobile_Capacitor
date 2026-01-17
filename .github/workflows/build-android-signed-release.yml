@@ -20,136 +20,59 @@ jobs:
       - name: Verify android project exists
         run: |
           set -e
-          test -f "android/gradlew" || (echo "ERROR: android/gradlew not found. Your repo must contain android/ at root." && exit 1)
-          test -f "android/app/build.gradle" || test -f "android/app/build.gradle.kts" || (echo "ERROR: android/app/build.gradle(.kts) not found." && exit 1)
-          ls -la
+          test -f "android/gradlew" || (echo "ERROR: android/gradlew not found. Repo must contain android/ at root." && exit 1)
+          test -f "android/app/build.gradle" || test -f "android/app/build.gradle.kts" || (echo "ERROR: android/app/build.gradle(.kts) not found" && exit 1)
+          ls -la android
+          ls -la android/app
 
-      # 1) Restore keystore from GitHub Secrets (base64)
       - name: Restore keystore + write keystore.properties
         working-directory: android
+        shell: bash
         env:
           ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
-          set -e
-          test -n "$ANDROID_KEYSTORE_B64" || (echo "ERROR: ANDROID_KEYSTORE_B64 secret is empty" && exit 1)
-          test -n "$ANDROID_KEYSTORE_PASSWORD" || (echo "ERROR: ANDROID_KEYSTORE_PASSWORD secret is empty" && exit 1)
-          test -n "$ANDROID_KEY_ALIAS" || (echo "ERROR: ANDROID_KEY_ALIAS secret is empty" && exit 1)
-          test -n "$ANDROID_KEY_PASSWORD" || (echo "ERROR: ANDROID_KEY_PASSWORD secret is empty" && exit 1)
+          set -euo pipefail
 
-          echo "$ANDROID_KEYSTORE_B64" | tr -d '\n\r' | base64 -d > app/rmpm-release.keystore
-          test -f app/rmpm-release.keystore
+          # Validate secrets exist
+          test -n "${ANDROID_KEYSTORE_B64:-}" || (echo "ERROR: ANDROID_KEYSTORE_B64 is empty" && exit 1)
+          test -n "${ANDROID_KEYSTORE_PASSWORD:-}" || (echo "ERROR: ANDROID_KEYSTORE_PASSWORD is empty" && exit 1)
+          test -n "${ANDROID_KEY_ALIAS:-}" || (echo "ERROR: ANDROID_KEY_ALIAS is empty" && exit 1)
+          test -n "${ANDROID_KEY_PASSWORD:-}" || (echo "ERROR: ANDROID_KEY_PASSWORD is empty" && exit 1)
 
-          cat > keystore.properties <<EOF
-storeFile=rmpm-release.keystore
-storePassword=$ANDROID_KEYSTORE_PASSWORD
-keyAlias=$ANDROID_KEY_ALIAS
-keyPassword=$ANDROID_KEY_PASSWORD
-EOF
+          # Decode keystore (base64 -> file)
+          echo "$ANDROID_KEYSTORE_B64" | tr -d '\n\r ' | base64 -d > rmpm-release.keystore
+          test -s rmpm-release.keystore || (echo "ERROR: keystore file not created / empty" && exit 1)
 
-          # safety: don't leak secrets in logs
-          sed -i 's/storePassword=.*/storePassword=***hidden***/' keystore.properties
-          sed -i 's/keyPassword=.*/keyPassword=***hidden***/' keystore.properties
-          cat keystore.properties
+          # Create keystore.properties (NO heredoc, so YAML can't break)
+          printf "storeFile=%s\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n" \
+            "rmpm-release.keystore" \
+            "$ANDROID_KEYSTORE_PASSWORD" \
+            "$ANDROID_KEY_ALIAS" \
+            "$ANDROID_KEY_PASSWORD" \
+            > keystore.properties
 
-      # 2) Ensure build.gradle loads keystore.properties and uses signingConfigs.release
-      - name: Patch app/build.gradle for release signing (if needed)
-        working-directory: android
-        run: |
-          set -e
-          if [ -f "app/build.gradle.kts" ]; then
-            echo "ERROR: Kotlin DSL (build.gradle.kts) detected. This workflow patches Groovy build.gradle. Tell me and I'll give you a .kts version."
-            exit 1
-          fi
+          echo "Created files:"
+          ls -la rmpm-release.keystore keystore.properties
 
-          python3 - <<'PY'
-          import re
-          from pathlib import Path
+          echo "keystore.properties (passwords hidden):"
+          cat keystore.properties \
+            | sed 's/storePassword=.*/storePassword=***hidden***/' \
+            | sed 's/keyPassword=.*/keyPassword=***hidden***/'
 
-          p = Path("app/build.gradle")
-          txt = p.read_text(encoding="utf-8")
-
-          # Insert keystoreProperties loader BEFORE android { if not present
-          if "keystorePropertiesFile" not in txt:
-              loader = (
-                  "def keystoreProperties = new Properties()\n"
-                  "def keystorePropertiesFile = rootProject.file('keystore.properties')\n"
-                  "if (keystorePropertiesFile.exists()) {\n"
-                  "    keystoreProperties.load(new FileInputStream(keystorePropertiesFile))\n"
-                  "}\n\n"
-              )
-              m = re.search(r"(?m)^[ \t]*android[ \t]*\{", txt)
-              if not m:
-                  raise SystemExit("ERROR: Could not find 'android {' in app/build.gradle")
-              txt = txt[:m.start()] + loader + txt[m.start():]
-
-          # Ensure signingConfigs.release exists inside android { ... }
-          if "signingConfigs" not in txt or "signingConfigs {" not in txt:
-              # add signingConfigs right after android {
-              txt = re.sub(
-                  r"(?m)^([ \t]*android[ \t]*\{)",
-                  r"\1\n\n    signingConfigs {\n        release {\n            if (keystorePropertiesFile.exists()) {\n                storeFile file(keystoreProperties['storeFile'])\n                storePassword keystoreProperties['storePassword']\n                keyAlias keystoreProperties['keyAlias']\n                keyPassword keystoreProperties['keyPassword']\n            }\n        }\n    }\n",
-                  txt,
-                  count=1
-              )
-          else:
-              # If signingConfigs exists but no release block, inject it.
-              if re.search(r"signingConfigs\s*\{[^}]*release\s*\{", txt, re.S) is None:
-                  txt = re.sub(
-                      r"(?s)(signingConfigs\s*\{)",
-                      r"\1\n        release {\n            if (keystorePropertiesFile.exists()) {\n                storeFile file(keystoreProperties['storeFile'])\n                storePassword keystoreProperties['storePassword']\n                keyAlias keystoreProperties['keyAlias']\n                keyPassword keystoreProperties['keyPassword']\n            }\n        }\n",
-                      txt,
-                      count=1
-                  )
-
-          # Ensure buildTypes.release uses signingConfig signingConfigs.release
-          bt = re.search(r"buildTypes\s*\{", txt)
-          if not bt:
-              # create buildTypes block if missing (rare)
-              txt = re.sub(
-                  r"(?m)^([ \t]*android[ \t]*\{)",
-                  r"\1\n\n    buildTypes {\n        release {\n            signingConfig signingConfigs.release\n        }\n    }\n",
-                  txt,
-                  count=1
-              )
-          else:
-              # If release block exists, ensure it contains signingConfig
-              if re.search(r"buildTypes\s*\{[^}]*release\s*\{", txt, re.S):
-                  # add signingConfig inside release if not there
-                  def add_signing(m):
-                      block = m.group(0)
-                      if "signingConfig" in block:
-                          return block
-                      # insert after opening brace
-                      return re.sub(r"\{\s*", "{\n            signingConfig signingConfigs.release\n", block, count=1)
-                  txt = re.sub(r"(?s)release\s*\{.*?\}", add_signing, txt, count=1)
-              else:
-                  # inject release block inside buildTypes
-                  txt = re.sub(
-                      r"(?s)(buildTypes\s*\{)",
-                      r"\1\n        release {\n            signingConfig signingConfigs.release\n        }\n",
-                      txt,
-                      count=1
-                  )
-
-          p.write_text(txt, encoding="utf-8")
-          print("Patched app/build.gradle successfully.")
-          PY
-
-      # 3) Build SIGNED release APK
       - name: Build SIGNED Release APK
         working-directory: android
         run: |
           set -e
           chmod +x gradlew
-          ./gradlew --no-daemon :app:assembleRelease
-          ls -ლა app/build/outputs/apk/release || true
+          ./gradlew --no-daemon clean assembleRelease
 
       - name: Upload Release APK
         uses: actions/upload-artifact@v4
         with:
           name: app-release-apk
-          path: android/app/build/outputs/apk/release/*.apk
-          if-no-files-found: error
+          path: |
+            android/app/build/outputs/apk/release/*.apk
+            android/app/build/outputs/apk/release/*.APK
