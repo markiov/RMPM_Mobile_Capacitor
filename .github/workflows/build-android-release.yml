@@ -22,86 +22,47 @@ jobs:
           distribution: temurin
           java-version: 17
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
       - name: Install deps
         working-directory: RMPM_Mobile_Capacitor
         run: npm install
-
-      - name: Build web (optional)
-        working-directory: RMPM_Mobile_Capacitor
-        run: npm run build || echo "no build script, continuing"
 
       - name: Ensure Android platform exists
         working-directory: RMPM_Mobile_Capacitor
         run: |
           if [ ! -d "android" ]; then
             npx cap add android
-          else
-            echo "android folder already exists"
           fi
 
       - name: Sync Capacitor
         working-directory: RMPM_Mobile_Capacitor
         run: npx cap sync android
 
-      - name: Restore keystore file
-        working-directory: RMPM_Mobile_Capacitor
+      - name: Restore keystore + write keystore.properties
+        working-directory: RMPM_Mobile_Capacitor/android
         env:
           ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
-        run: |
-          echo "$ANDROID_KEYSTORE_B64" | tr -d '\n\r ' | base64 -d > rmpm-release.keystore
-          test -f rmpm-release.keystore
-          ls -lah rmpm-release.keystore
-
-      - name: Build Release APK (unsigned)
-        working-directory: RMPM_Mobile_Capacitor/android
-        run: ./gradlew assembleRelease
-
-      - name: Sign APK with apksigner
-        working-directory: RMPM_Mobile_Capacitor/android
-        env:
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
         run: |
-          set -e
+          echo "$ANDROID_KEYSTORE_B64" | tr -d '\n' | base64 -d > rmpm-release.keystore
 
-          UNSIGNED="app/build/outputs/apk/release/app-release-unsigned.apk"
-          if [ ! -f "$UNSIGNED" ]; then
-            echo "Unsigned APK not found at $UNSIGNED"
-            echo "Listing output folder:"
-            ls -R app/build/outputs/apk/release || true
-            exit 1
-          fi
+          cat > keystore.properties <<EOF
+          storeFile=rmpm-release.keystore
+          storePassword=$ANDROID_KEYSTORE_PASSWORD
+          keyAlias=$ANDROID_KEY_ALIAS
+          keyPassword=$ANDROID_KEY_PASSWORD
+          EOF
 
-          # Find apksigner
-          APKSIGNER="$(find "$ANDROID_SDK_ROOT/build-tools" -type f -name apksigner | sort | tail -n 1)"
-          if [ -z "$APKSIGNER" ]; then
-            echo "apksigner not found"
-            exit 1
-          fi
+          echo "Keystore restored:"
+          ls -la rmpm-release.keystore keystore.properties
 
-          echo "Using apksigner: $APKSIGNER"
+      - name: Build Release APK
+        working-directory: RMPM_Mobile_Capacitor/android
+        run: ./gradlew assembleRelease
 
-          # Copy keystore into android folder for signing step
-          cp ../rmpm-release.keystore ./rmpm-release.keystore
-
-          SIGNED="app/build/outputs/apk/release/app-release-signed.apk"
-          "$APKSIGNER" sign \
-            --ks rmpm-release.keystore \
-            --ks-key-alias "$ANDROID_KEY_ALIAS" \
-            --ks-pass pass:"$ANDROID_KEYSTORE_PASSWORD" \
-            --key-pass pass:"$ANDROID_KEY_PASSWORD" \
-            --out "$SIGNED" \
-            "$UNSIGNED"
-
-          "$APKSIGNER" verify --verbose "$SIGNED"
-          ls -lah app/build/outputs/apk/release/
-
-      - name: Upload Signed Release APK
+      - name: Upload Release APK
         uses: actions/upload-artifact@v4
         with:
-          name: rmpm-release-signed-apk
-          path: RMPM_Mobile_Capacitor/android/app/build/outputs/apk/release/app-release-signed.apk
+          name: app-release-apk
+          path: RMPM_Mobile_Capacitor/android/app/build/outputs/apk/release/app-release.apk
