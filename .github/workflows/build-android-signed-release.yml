@@ -11,34 +11,38 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
       - name: Setup Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
 
-      - name: Detect ANDROID_DIR
-        id: detect
+      - name: Verify Capacitor project exists
         shell: bash
         run: |
           set -e
+          test -f "RMPM_Mobile_Capacitor/package.json" || (echo "ERROR: RMPM_Mobile_Capacitor/package.json not found" && ls -la && exit 1)
 
-          if [ -f "android/gradlew" ] && [ -d "android/app" ]; then
-            echo "ANDROID_DIR=android" >> $GITHUB_ENV
-            echo "Detected android at repo root: android/"
-          elif [ -f "RMPM_Mobile_Capacitor/android/gradlew" ] && [ -d "RMPM_Mobile_Capacitor/android/app" ]; then
-            echo "ANDROID_DIR=RMPM_Mobile_Capacitor/android" >> $GITHUB_ENV
-            echo "Detected android in: RMPM_Mobile_Capacitor/android"
-          else
-            echo "ERROR: Could not find android project folder."
-            echo "Repo root contains:"
-            ls -la
-            exit 1
-          fi
+      - name: Install deps
+        working-directory: RMPM_Mobile_Capacitor
+        run: npm ci || npm install
+
+      - name: Ensure Android platform exists
+        working-directory: RMPM_Mobile_Capacitor
+        run: npx cap add android || echo "android already exists"
+
+      - name: Sync Capacitor (regenerates capacitor-android module)
+        working-directory: RMPM_Mobile_Capacitor
+        run: npx cap sync android
 
       - name: Restore keystore + write keystore.properties
         shell: bash
-        working-directory: ${{ env.ANDROID_DIR }}
+        working-directory: RMPM_Mobile_Capacitor/android
         env:
           ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
@@ -46,17 +50,14 @@ jobs:
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
           set -e
+          test -n "$ANDROID_KEYSTORE_B64" || (echo "ERROR: ANDROID_KEYSTORE_B64 empty" && exit 1)
+          test -n "$ANDROID_KEYSTORE_PASSWORD" || (echo "ERROR: ANDROID_KEYSTORE_PASSWORD empty" && exit 1)
+          test -n "$ANDROID_KEY_ALIAS" || (echo "ERROR: ANDROID_KEY_ALIAS empty" && exit 1)
+          test -n "$ANDROID_KEY_PASSWORD" || (echo "ERROR: ANDROID_KEY_PASSWORD empty" && exit 1)
 
-          test -n "$ANDROID_KEYSTORE_B64" || (echo "ERROR: ANDROID_KEYSTORE_B64 is empty" && exit 1)
-          test -n "$ANDROID_KEYSTORE_PASSWORD" || (echo "ERROR: ANDROID_KEYSTORE_PASSWORD is empty" && exit 1)
-          test -n "$ANDROID_KEY_ALIAS" || (echo "ERROR: ANDROID_KEY_ALIAS is empty" && exit 1)
-          test -n "$ANDROID_KEY_PASSWORD" || (echo "ERROR: ANDROID_KEY_PASSWORD is empty" && exit 1)
-
-          # keystore bestand in app/ zetten (zodat storeFile=rmpm-release.keystore werkt)
           echo "$ANDROID_KEYSTORE_B64" | tr -d '\n\r' | base64 -d > app/rmpm-release.keystore
           test -f app/rmpm-release.keystore
 
-          # keystore.properties in android root
           cat > keystore.properties <<EOF
           storeFile=rmpm-release.keystore
           storePassword=$ANDROID_KEYSTORE_PASSWORD
@@ -64,39 +65,22 @@ jobs:
           keyPassword=$ANDROID_KEY_PASSWORD
           EOF
 
-          # laat zien dat file bestaat (maar zonder secrets te lekken)
-          echo "keystore.properties written. (Secrets hidden)"
-          sed -i 's/storePassword=.*/storePassword=***hidden***/' keystore.properties
-          sed -i 's/keyPassword=.*/keyPassword=***hidden***/' keystore.properties
-          cat keystore.properties
-
       - name: Make gradlew executable
-        shell: bash
-        working-directory: ${{ env.ANDROID_DIR }}
-        run: |
-          set -e
-          chmod +x ./gradlew
-          ls -la ./gradlew
+        working-directory: RMPM_Mobile_Capacitor/android
+        run: chmod +x ./gradlew
 
       - name: Build Release APK (SIGNED)
-        shell: bash
-        working-directory: ${{ env.ANDROID_DIR }}
-        run: |
-          set -e
-          ./gradlew clean :app:assembleRelease
+        working-directory: RMPM_Mobile_Capacitor/android
+        run: ./gradlew clean :app:assembleRelease
 
       - name: Show APK outputs
-        shell: bash
-        working-directory: ${{ env.ANDROID_DIR }}
+        working-directory: RMPM_Mobile_Capacitor/android
         run: |
-          set -e
-          echo "APK outputs:"
           ls -la app/build/outputs/apk/release || true
-          find app/build/outputs -maxdepth 6 -type f -name "*.apk" -print || true
+          find app/build/outputs -type f -name "*.apk" -print || true
 
       - name: Upload Release APK
         uses: actions/upload-artifact@v4
         with:
           name: app-release-apk
-          path: |
-            ${{ env.ANDROID_DIR }}/app/build/outputs/apk/release/*.apk
+          path: RMPM_Mobile_Capacitor/android/app/build/outputs/apk/release/*.apk
