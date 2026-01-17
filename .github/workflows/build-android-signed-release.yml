@@ -4,39 +4,61 @@ on:
   workflow_dispatch:
 
 jobs:
-  build_signed_release:
+  build:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node 20
+      - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      - name: Setup Java 17
+      - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
 
-      - name: Install Capacitor deps (creates node_modules)
+      # Detect where the Capacitor project lives
+      - name: Detect project directories
+        shell: bash
         run: |
           set -e
-          test -f package.json || (echo "ERROR: package.json missing in repo root" && exit 1)
-          npm install
+          if [ -f "RMPM_Mobile_Capacitor/package.json" ]; then
+            echo "PROJECT_DIR=RMPM_Mobile_Capacitor" >> $GITHUB_ENV
+          elif [ -f "package.json" ]; then
+            echo "PROJECT_DIR=." >> $GITHUB_ENV
+          else
+            echo "ERROR: package.json not found in repo root or RMPM_Mobile_Capacitor/"
+            echo "Repo root contains:"
+            ls -la
+            exit 1
+          fi
 
-      - name: Verify android project exists
-        run: |
-          set -e
-          test -f "android/gradlew" || (echo "ERROR: android/gradlew not found." && exit 1)
-          ls -la
-          ls -la android
+          echo "ANDROID_DIR=${PROJECT_DIR}/android" >> $GITHUB_ENV
 
+          echo "Using PROJECT_DIR=$PROJECT_DIR"
+          echo "Using ANDROID_DIR=$ANDROID_DIR"
+
+          test -f "${PROJECT_DIR}/package.json" || (echo "ERROR: package.json missing" && exit 1)
+
+      - name: Install deps
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: npm ci
+
+      - name: Ensure Android platform exists
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: npx cap add android || echo "android already exists"
+
+      - name: Sync Capacitor
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: npx cap sync android
+
+      # Restore keystore into android/app/ and write android/keystore.properties
       - name: Restore keystore + write keystore.properties
-        working-directory: android
         shell: bash
         env:
           ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
@@ -44,37 +66,104 @@ jobs:
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
-          set -euo pipefail
+          set -e
 
-          test -n "${ANDROID_KEYSTORE_B64:-}" || (echo "ERROR: ANDROID_KEYSTORE_B64 empty" && exit 1)
-          test -n "${ANDROID_KEYSTORE_PASSWORD:-}" || (echo "ERROR: ANDROID_KEYSTORE_PASSWORD empty" && exit 1)
-          test -n "${ANDROID_KEY_ALIAS:-}" || (echo "ERROR: ANDROID_KEY_ALIAS empty" && exit 1)
-          test -n "${ANDROID_KEY_PASSWORD:-}" || (echo "ERROR: ANDROID_KEY_PASSWORD empty" && exit 1)
+          test -n "$ANDROID_KEYSTORE_B64" || (echo "ERROR: ANDROID_KEYSTORE_B64 is empty" && exit 1)
+          test -n "$ANDROID_KEYSTORE_PASSWORD" || (echo "ERROR: ANDROID_KEYSTORE_PASSWORD is empty" && exit 1)
+          test -n "$ANDROID_KEY_ALIAS" || (echo "ERROR: ANDROID_KEY_ALIAS is empty" && exit 1)
+          test -n "$ANDROID_KEY_PASSWORD" || (echo "ERROR: ANDROID_KEY_PASSWORD is empty" && exit 1)
 
-          echo "$ANDROID_KEYSTORE_B64" | tr -d '\n\r ' | base64 -d > rmpm-release.keystore
-          test -s rmpm-release.keystore || (echo "ERROR: keystore not created" && exit 1)
+          test -d "$ANDROID_DIR" || (echo "ERROR: ANDROID_DIR not found: $ANDROID_DIR" && ls -la && exit 1)
+          test -d "$ANDROID_DIR/app" || (echo "ERROR: $ANDROID_DIR/app not found" && ls -la "$ANDROID_DIR" && exit 1)
 
-          printf "storeFile=%s\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n" \
-            "rmpm-release.keystore" \
-            "$ANDROID_KEYSTORE_PASSWORD" \
-            "$ANDROID_KEY_ALIAS" \
-            "$ANDROID_KEY_PASSWORD" \
-            > keystore.properties
+          # Write keystore file
+          echo "$ANDROID_KEYSTORE_B64" | tr -d '\n' | base64 -d > "$ANDROID_DIR/app/rmpm-release.keystore"
+          test -f "$ANDROID_DIR/app/rmpm-release.keystore"
 
-          echo "keystore.properties (hidden):"
-          cat keystore.properties \
-            | sed 's/storePassword=.*/storePassword=***hidden***/' \
-            | sed 's/keyPassword=.*/keyPassword=***hidden***/'
+          # Write keystore.properties (NO heredoc, avoids YAML issues)
+          printf "storeFile=app/rmpm-release.keystore\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n" \
+            "$ANDROID_KEYSTORE_PASSWORD" "$ANDROID_KEY_ALIAS" "$ANDROID_KEY_PASSWORD" \
+            > "$ANDROID_DIR/keystore.properties"
 
-      - name: Build SIGNED Release APK
-        working-directory: android
+          # Don’t leak secrets to logs:
+          sed -i 's/storePassword=.*/storePassword=***hidden***/' "$ANDROID_DIR/keystore.properties"
+          sed -i 's/keyPassword=.*/keyPassword=***hidden***/' "$ANDROID_DIR/keystore.properties"
+          cat "$ANDROID_DIR/keystore.properties"
+
+      # Patch android/app/build.gradle to use keystore.properties if needed
+      - name: Ensure release signingConfig is enabled
+        shell: bash
         run: |
           set -e
-          chmod +x gradlew
-          ./gradlew --no-daemon clean assembleRelease
+          APP_GRADLE="$ANDROID_DIR/app/build.gradle"
+          test -f "$APP_GRADLE" || (echo "ERROR: $APP_GRADLE not found" && exit 1)
 
-      - name: Upload Release APK
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("${APP_GRADLE}")
+          s = p.read_text(encoding="utf-8")
+
+          # Insert keystore.properties loader if missing
+          if "keystorePropertiesFile" not in s:
+              insert = """
+// --- Added by GitHub Actions for release signing ---
+def keystoreProperties = new Properties()
+def keystorePropertiesFile = rootProject.file("keystore.properties")
+if (keystorePropertiesFile.exists()) {
+    keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
+}
+// --- End added ---
+"""
+              # put it near top (after plugins/apply lines usually)
+              s = insert + "\n" + s
+
+          # Ensure signingConfigs { release { ... } } exists
+          if "signingConfigs" not in s or "release {" not in s[s.find("signingConfigs"):]:
+              # best-effort: add signingConfigs block inside android { ... }
+              if "android {" in s:
+                  idx = s.find("android {") + len("android {")
+                  add = """
+    signingConfigs {
+        release {
+            if (keystorePropertiesFile.exists()) {
+                storeFile file(keystoreProperties["storeFile"])
+                storePassword keystoreProperties["storePassword"]
+                keyAlias keystoreProperties["keyAlias"]
+                keyPassword keystoreProperties["keyPassword"]
+            }
+        }
+    }
+"""
+                  s = s[:idx] + add + s[idx:]
+
+          # Ensure buildTypes.release uses signingConfig release
+          if "buildTypes" in s and "signingConfig signingConfigs.release" not in s:
+              s = s.replace("release {", "release {\n            signingConfig signingConfigs.release", 1)
+
+          p.write_text(s, encoding="utf-8")
+          print("Patched:", p)
+          PY
+
+          echo "---- build.gradle (snippet) ----"
+          grep -n "keystorePropertiesFile\\|signingConfigs\\|signingConfig signingConfigs.release" -n "$APP_GRADLE" | head -n 80 || true
+
+      - name: Build SIGNED Release APK
+        working-directory: ${{ env.ANDROID_DIR }}
+        run: ./gradlew clean assembleRelease
+
+      - name: List outputs
+        shell: bash
+        run: |
+          set -e
+          echo "APK outputs:"
+          ls -la "$ANDROID_DIR/app/build/outputs/apk/release" || true
+          echo "AAB outputs:"
+          ls -la "$ANDROID_DIR/app/build/outputs/bundle/release" || true
+
+      - name: Upload Release APK/AAB
         uses: actions/upload-artifact@v4
         with:
-          name: app-release-apk
-          path: android/app/build/outputs/apk/release/*.apk
+          name: rmpm-release-artifacts
+          path: |
+            ${{ env.ANDROID_DIR }}/app/build/outputs/apk/release/*.apk
+            ${{ env.ANDROID_DIR }}/app/build/outputs/bundle/release/*.aab
