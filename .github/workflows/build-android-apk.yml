@@ -1,5 +1,4 @@
-
-name: Build Android APK
+name: Build Android (Signed Release)
 
 on:
   workflow_dispatch:
@@ -7,6 +6,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -38,12 +38,82 @@ jobs:
         working-directory: RMPM_Mobile_Capacitor
         run: npx cap sync android
 
-      - name: Build Debug APK
+      - name: Decode keystore
         working-directory: RMPM_Mobile_Capacitor/android
-        run: ./gradlew assembleDebug
+        env:
+          ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+        run: |
+          echo "$ANDROID_KEYSTORE_B64" | tr -d '\n\r' | base64 -d > rmpm-release.keystore
+          ls -la
 
-      - name: Upload APK
+      - name: Create keystore.properties
+        working-directory: RMPM_Mobile_Capacitor/android
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          cat > keystore.properties <<EOF
+          storeFile=rmpm-release.keystore
+          storePassword=$ANDROID_KEYSTORE_PASSWORD
+          keyAlias=$ANDROID_KEY_ALIAS
+          keyPassword=$ANDROID_KEY_PASSWORD
+          EOF
+          cat keystore.properties | sed 's/storePassword=.*/storePassword=***hidden***/' | sed 's/keyPassword=.*/keyPassword=***hidden***/'
+
+      - name: Ensure Gradle signing config
+        working-directory: RMPM_Mobile_Capacitor/android
+        run: |
+          APP_GRADLE="app/build.gradle"
+          if [ ! -f "$APP_GRADLE" ]; then
+            echo "ERROR: $APP_GRADLE not found"
+            exit 1
+          fi
+
+          # Add keystore properties loader if missing
+          if ! grep -q "keystorePropertiesFile" "$APP_GRADLE"; then
+            sed -i '1i\
+def keystoreProperties = new Properties()\
+def keystorePropertiesFile = rootProject.file("keystore.properties")\
+if (keystorePropertiesFile.exists()) {\
+    keystoreProperties.load(new FileInputStream(keystorePropertiesFile))\
+}\
+' "$APP_GRADLE"
+          fi
+
+          # Add signingConfigs/release if missing
+          if ! grep -q "signingConfigs" "$APP_GRADLE"; then
+            sed -i '/android {/a\
+    signingConfigs {\
+        release {\
+            storeFile file(keystoreProperties["storeFile"] ?: "rmpm-release.keystore")\
+            storePassword keystoreProperties["storePassword"]\
+            keyAlias keystoreProperties["keyAlias"]\
+            keyPassword keystoreProperties["keyPassword"]\
+        }\
+    }\
+' "$APP_GRADLE"
+          fi
+
+          # Ensure release buildType uses signingConfig
+          if grep -q "buildTypes" "$APP_GRADLE"; then
+            if ! grep -q "signingConfig signingConfigs.release" "$APP_GRADLE"; then
+              # Add signingConfig inside release { } block
+              sed -i '/release {/,/}/ { /release {/ a\
+            signingConfig signingConfigs.release\
+              }' "$APP_GRADLE"
+            fi
+          fi
+
+          echo "---- app/build.gradle (snippet) ----"
+          grep -n "signingConfigs\|signingConfig signingConfigs.release\|keystorePropertiesFile" -n "$APP_GRADLE" || true
+
+      - name: Build Release APK
+        working-directory: RMPM_Mobile_Capacitor/android
+        run: ./gradlew assembleRelease
+
+      - name: Upload Release APK
         uses: actions/upload-artifact@v4
         with:
-          name: app-debug-apk
-          path: RMPM_Mobile_Capacitor/android/app/build/outputs/apk/debug/app-debug.apk
+          name: app-release-apk
+          path: RMPM_Mobile_Capacitor/android/app/build/outputs/apk/release/app-release.apk
