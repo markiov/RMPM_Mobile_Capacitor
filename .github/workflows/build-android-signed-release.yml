@@ -6,6 +6,9 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
 
     steps:
       - name: Checkout
@@ -23,21 +26,36 @@ jobs:
           java-version: 17
 
       - name: Detect project directory
-        shell: bash
         run: |
           set -e
+          echo "Repo root listing:"
+          ls -la
+
           if [ -f "RMPM_Mobile_Capacitor/package.json" ]; then
-            echo "PROJECT_DIR=RMPM_Mobile_Capacitor" >> $GITHUB_ENV
+            PROJECT_DIR="RMPM_Mobile_Capacitor"
           elif [ -f "package.json" ]; then
-            echo "PROJECT_DIR=." >> $GITHUB_ENV
+            PROJECT_DIR="."
           else
             echo "ERROR: package.json not found in repo root or RMPM_Mobile_Capacitor/"
-            ls -la
             exit 1
           fi
-          echo "ANDROID_DIR=${PROJECT_DIR}/android" >> $GITHUB_ENV
-          echo "Using PROJECT_DIR=$PROJECT_DIR"
-          echo "Using ANDROID_DIR=$ANDROID_DIR"
+
+          ANDROID_DIR="${PROJECT_DIR}/android"
+
+          # Export to later steps
+          echo "PROJECT_DIR=${PROJECT_DIR}" >> "$GITHUB_ENV"
+          echo "ANDROID_DIR=${ANDROID_DIR}" >> "$GITHUB_ENV"
+
+          echo "PROJECT_DIR=$PROJECT_DIR"
+          echo "ANDROID_DIR=$ANDROID_DIR"
+
+          # Verify android dir exists
+          if [ ! -d "$ANDROID_DIR" ]; then
+            echo "ERROR: ANDROID_DIR does not exist: $ANDROID_DIR"
+            echo "Listing PROJECT_DIR:"
+            ls -la "$PROJECT_DIR" || true
+            exit 1
+          fi
 
       - name: Install deps
         working-directory: ${{ env.PROJECT_DIR }}
@@ -52,7 +70,6 @@ jobs:
         run: npx cap sync android
 
       - name: Restore keystore + write keystore.properties
-        shell: bash
         env:
           ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
@@ -61,24 +78,24 @@ jobs:
         run: |
           set -e
 
+          echo "ANDROID_DIR is: $ANDROID_DIR"
+          ls -la "$ANDROID_DIR"
+
           test -n "$ANDROID_KEYSTORE_B64" || (echo "ERROR: ANDROID_KEYSTORE_B64 is empty" && exit 1)
           test -n "$ANDROID_KEYSTORE_PASSWORD" || (echo "ERROR: ANDROID_KEYSTORE_PASSWORD is empty" && exit 1)
           test -n "$ANDROID_KEY_ALIAS" || (echo "ERROR: ANDROID_KEY_ALIAS is empty" && exit 1)
           test -n "$ANDROID_KEY_PASSWORD" || (echo "ERROR: ANDROID_KEY_PASSWORD is empty" && exit 1)
 
-          test -d "$ANDROID_DIR" || (echo "ERROR: ANDROID_DIR not found: $ANDROID_DIR" && ls -la && exit 1)
           test -d "$ANDROID_DIR/app" || (echo "ERROR: $ANDROID_DIR/app not found" && ls -la "$ANDROID_DIR" && exit 1)
 
-          # Keystore file
           echo "$ANDROID_KEYSTORE_B64" | tr -d '\n' | base64 -d > "$ANDROID_DIR/app/rmpm-release.keystore"
           test -f "$ANDROID_DIR/app/rmpm-release.keystore"
 
-          # keystore.properties (no heredoc = no YAML drama)
           printf "storeFile=app/rmpm-release.keystore\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n" \
             "$ANDROID_KEYSTORE_PASSWORD" "$ANDROID_KEY_ALIAS" "$ANDROID_KEY_PASSWORD" \
             > "$ANDROID_DIR/keystore.properties"
 
-          # verify (hide secrets)
+          # Hide secrets in log
           sed -i 's/storePassword=.*/storePassword=***hidden***/' "$ANDROID_DIR/keystore.properties"
           sed -i 's/keyPassword=.*/keyPassword=***hidden***/' "$ANDROID_DIR/keystore.properties"
           echo "keystore.properties written:"
@@ -89,7 +106,6 @@ jobs:
         run: ./gradlew clean assembleRelease
 
       - name: Show APK outputs
-        shell: bash
         run: |
           set -e
           echo "APK folder:"
