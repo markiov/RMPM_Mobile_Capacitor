@@ -1,4 +1,4 @@
-name: Build Android (Debug + Release Signed)
+name: Build Android (Signed Release)
 
 on:
   workflow_dispatch:
@@ -38,17 +38,16 @@ jobs:
         working-directory: RMPM_Mobile_Capacitor
         run: npx cap sync android
 
-      # --- Decode keystore from GitHub Secrets ---
       - name: Decode Android keystore
         working-directory: RMPM_Mobile_Capacitor/android
         env:
           ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
         run: |
           echo "$ANDROID_KEYSTORE_B64" | tr -d '\n\r ' | base64 -d > rmpm-release.keystore
+          test -f rmpm-release.keystore
           ls -la
 
-      # --- Write signing properties for Gradle ---
-      - name: Create signing properties
+      - name: Create keystore.properties
         working-directory: RMPM_Mobile_Capacitor/android
         env:
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
@@ -56,88 +55,21 @@ jobs:
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
           cat > keystore.properties <<EOF
-          storeFile=rmpm-release.keystore
-          storePassword=${ANDROID_KEYSTORE_PASSWORD}
-          keyAlias=${ANDROID_KEY_ALIAS}
-          keyPassword=${ANDROID_KEY_PASSWORD}
-          EOF
-          cat keystore.properties | sed 's/storePassword=.*/storePassword=***hidden***/' | sed 's/keyPassword=.*/keyPassword=***hidden***/'
-
-      # --- Ensure app/build.gradle uses keystore.properties (safe append) ---
-      - name: Ensure Gradle signing config
-        working-directory: RMPM_Mobile_Capacitor/android
-        run: |
-          if ! grep -q "keystore.properties" app/build.gradle; then
-            echo "Patching app/build.gradle for release signing..."
-            python3 - <<'PY'
-import re, pathlib
-p = pathlib.Path("app/build.gradle")
-txt = p.read_text(encoding="utf-8")
-
-# Add keystoreProperties loading near top
-if "keystorePropertiesFile" not in txt:
-    insert = """def keystoreProperties = new Properties()
-def keystorePropertiesFile = rootProject.file("keystore.properties")
-if (keystorePropertiesFile.exists()) {
-    keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
-}
-"""
-    # place after first line or after plugins block
-    if "plugins {" in txt:
-        m = re.search(r"plugins\s*\{[^}]*\}\s*", txt, re.S)
-        if m:
-            txt = txt[:m.end()] + "\n" + insert + txt[m.end():]
-        else:
-            txt = insert + "\n" + txt
-    else:
-        txt = insert + "\n" + txt
-
-# Ensure signingConfigs/release exists
-if "signingConfigs" not in txt:
-    # find android { ... } open
-    m = re.search(r"android\s*\{", txt)
-    if m:
-        pos = m.end()
-        add = """
-    signingConfigs {
-        release {
-            storeFile file(keystoreProperties['storeFile'])
-            storePassword keystoreProperties['storePassword']
-            keyAlias keystoreProperties['keyAlias']
-            keyPassword keystoreProperties['keyPassword']
-        }
-    }
-"""
-        txt = txt[:pos] + add + txt[pos:]
-else:
-    # if signingConfigs exists but no release, inject a release block
-    if re.search(r"signingConfigs\s*\{[^}]*release\s*\{", txt, re.S) is None:
-        txt = re.sub(r"signingConfigs\s*\{", r"signingConfigs {\n        release {\n            storeFile file(keystoreProperties['storeFile'])\n            storePassword keystoreProperties['storePassword']\n            keyAlias keystoreProperties['keyAlias']\n            keyPassword keystoreProperties['keyPassword']\n        }\n", txt, count=1)
-
-# Ensure buildTypes.release.signingConfig = signingConfigs.release
-if re.search(r"buildTypes\s*\{", txt) and re.search(r"buildTypes\s*\{[^}]*release\s*\{", txt, re.S):
-    # if release block exists but no signingConfig line, add it
-    def add_signing(m):
-        block = m.group(0)
-        if "signingConfig" in block:
-            return block
-        return block + "\n            signingConfig signingConfigs.release\n"
-    txt = re.sub(r"release\s*\{[^}]*\}", add_signing, txt, count=1, flags=re.S)
-
-p.write_text(txt, encoding="utf-8")
-print("OK")
-PY
-          fi
+storeFile=rmpm-release.keystore
+storePassword=${ANDROID_KEYSTORE_PASSWORD}
+keyAlias=${ANDROID_KEY_ALIAS}
+keyPassword=${ANDROID_KEY_PASSWORD}
+EOF
 
       - name: Build Debug APK
         working-directory: RMPM_Mobile_Capacitor/android
         run: ./gradlew assembleDebug
 
-      - name: Build Release APK (signed)
+      - name: Build Release APK
         working-directory: RMPM_Mobile_Capacitor/android
         run: ./gradlew assembleRelease
 
-      - name: Build Release AAB (signed)
+      - name: Build Release AAB
         working-directory: RMPM_Mobile_Capacitor/android
         run: ./gradlew bundleRelease
 
@@ -150,11 +82,11 @@ PY
       - name: Upload Release APK
         uses: actions/upload-artifact@v4
         with:
-          name: app-release-apk-signed
+          name: app-release-apk
           path: RMPM_Mobile_Capacitor/android/app/build/outputs/apk/release/app-release.apk
 
       - name: Upload Release AAB
         uses: actions/upload-artifact@v4
         with:
-          name: app-release-aab-signed
+          name: app-release-aab
           path: RMPM_Mobile_Capacitor/android/app/build/outputs/bundle/release/app-release.aab
