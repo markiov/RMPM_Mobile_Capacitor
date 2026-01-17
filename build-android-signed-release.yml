@@ -1,0 +1,64 @@
+name: Build Android APK (Signed Release)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      # (optioneel) gradle cache voor snelheid
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+
+      - name: Restore keystore + prepare paths
+        working-directory: android
+        env:
+          ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+        run: |
+          set -e
+          if [ -z "$ANDROID_KEYSTORE_B64" ]; then
+            echo "ERROR: Secret ANDROID_KEYSTORE_B64 is missing/empty"
+            exit 1
+          fi
+
+          echo "$ANDROID_KEYSTORE_B64" | tr -d '\n\r ' | base64 -d > rmpm-release.keystore
+          test -f rmpm-release.keystore
+          ls -lah rmpm-release.keystore
+
+      - name: Build SIGNED Release APK
+        working-directory: android
+        env:
+          STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          set -e
+          chmod +x ./gradlew
+
+          if [ -z "$STORE_PASSWORD" ] || [ -z "$KEY_PASSWORD" ] || [ -z "$KEY_ALIAS" ]; then
+            echo "ERROR: One of secrets is missing: ANDROID_KEYSTORE_PASSWORD / ANDROID_KEY_PASSWORD / ANDROID_KEY_ALIAS"
+            exit 1
+          fi
+
+          ./gradlew --no-daemon clean assembleRelease \
+            -Pandroid.injected.signing.store.file="$(pwd)/rmpm-release.keystore" \
+            -Pandroid.injected.signing.store.password="$STORE_PASSWORD" \
+            -Pandroid.injected.signing.key.alias="$KEY_ALIAS" \
+            -Pandroid.injected.signing.key.password="$KEY_PASSWORD"
+
+      - name: Upload Release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release-apk
+          path: android/app/build/outputs/apk/release/*.apk
