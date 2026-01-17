@@ -26,26 +26,54 @@ jobs:
         working-directory: RMPM_Mobile_Capacitor
         run: npm install
 
-      - name: Ensure Android platform exists
+      - name: Build web (optional)
         working-directory: RMPM_Mobile_Capacitor
-        run: |
-          if [ ! -d "android" ]; then
-            npx cap add android
-          fi
+        run: npm run build || echo "no build script, continuing"
+
+      - name: Add Android (if missing)
+        working-directory: RMPM_Mobile_Capacitor
+        run: npx cap add android || echo "android already exists"
 
       - name: Sync Capacitor
         working-directory: RMPM_Mobile_Capacitor
         run: npx cap sync android
 
+      # --- Detect which android folder exists (some repos have both) ---
+      - name: Detect Android directory
+        shell: bash
+        run: |
+          if [ -f "RMPM_Mobile_Capacitor/android/gradlew" ]; then
+            echo "ANDROID_DIR=RMPM_Mobile_Capacitor/android" >> $GITHUB_ENV
+          elif [ -f "android/gradlew" ]; then
+            echo "ANDROID_DIR=android" >> $GITHUB_ENV
+          else
+            echo "ERROR: Could not find gradlew in RMPM_Mobile_Capacitor/android or android"
+            echo "Repo root listing:"
+            ls -la
+            echo "RMPM_Mobile_Capacitor listing:"
+            ls -la RMPM_Mobile_Capacitor || true
+            exit 1
+          fi
+          echo "Using ANDROID_DIR=$ANDROID_DIR"
+
+      # --- Restore keystore + write keystore.properties in that android folder ---
       - name: Restore keystore + write keystore.properties
-        working-directory: RMPM_Mobile_Capacitor/android
+        shell: bash
         env:
           ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
         run: |
-          echo "$ANDROID_KEYSTORE_B64" | tr -d '\n' | base64 -d > rmpm-release.keystore
+          cd "$ANDROID_DIR"
+
+          if [ -z "$ANDROID_KEYSTORE_B64" ]; then
+            echo "ERROR: ANDROID_KEYSTORE_B64 secret is empty/missing"
+            exit 1
+          fi
+
+          echo "$ANDROID_KEYSTORE_B64" | tr -d '\n\r ' | base64 -d > rmpm-release.keystore
+          test -s rmpm-release.keystore
 
           cat > keystore.properties <<EOF
           storeFile=rmpm-release.keystore
@@ -54,14 +82,30 @@ jobs:
           keyPassword=$ANDROID_KEY_PASSWORD
           EOF
 
-          ls -la rmpm-release.keystore keystore.properties
+          echo "keystore.properties created:"
+          cat keystore.properties | sed 's/storePassword=.*/storePassword=***hidden***/' | sed 's/keyPassword=.*/keyPassword=***hidden***/'
 
       - name: Build Release APK
-        working-directory: RMPM_Mobile_Capacitor/android
-        run: ./gradlew assembleRelease
+        shell: bash
+        run: |
+          cd "$ANDROID_DIR"
+          chmod +x ./gradlew
+          ./gradlew assembleRelease --no-daemon
 
-      - name: Upload Release APK
+      - name: List build outputs
+        shell: bash
+        run: |
+          echo "ANDROID_DIR=$ANDROID_DIR"
+          echo "Listing outputs:"
+          ls -la "$ANDROID_DIR/app/build/outputs" || true
+          echo "Find APK/AAB:"
+          find "$ANDROID_DIR/app/build/outputs" -type f \( -name "*.apk" -o -name "*.aab" \) -print || true
+
+      - name: Upload Release Artifacts (APK/AAB)
         uses: actions/upload-artifact@v4
         with:
-          name: app-release-apk
-          path: RMPM_Mobile_Capacitor/android/app/build/outputs/apk/release/app-release.apk
+          name: android-release-build
+          if-no-files-found: error
+          path: |
+            ${{ env.ANDROID_DIR }}/app/build/outputs/**/*.apk
+            ${{ env.ANDROID_DIR }}/app/build/outputs/**/*.aab
