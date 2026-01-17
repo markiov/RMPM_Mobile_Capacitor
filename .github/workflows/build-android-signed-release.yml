@@ -1,4 +1,4 @@
-name: Build Android Signed Release APK
+name: Build Android APK (Signed Release)
 
 on:
   workflow_dispatch:
@@ -6,128 +6,59 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        shell: bash
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-
-      - name: Setup Java
+      - name: Setup Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: 17
 
-      # --- IMPORTANT: set this to the folder that contains package.json ---
-      - name: Set project paths
-        run: |
-          set -e
-          PROJECT_DIR="."
+      # (optioneel) gradle cache voor snelheid
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
 
-          if [ ! -f "$PROJECT_DIR/package.json" ]; then
-            echo "ERROR: Expected $PROJECT_DIR/package.json not found."
-            echo "Repo root contains:"
-            ls -la
-            echo ""
-            echo "If your package.json is in repo root, set PROJECT_DIR='.' in this workflow."
-            exit 1
-          fi
-
-          echo "PROJECT_DIR=$PROJECT_DIR" >> $GITHUB_ENV
-          echo "ANDROID_DIR=android" >> $GITHUB_ENV
-
-      - name: Install deps
-        working-directory: ${{ env.PROJECT_DIR }}
-        run: |
-          set -e
-          npm ci || npm install
-
-      - name: Build web (optional)
-        working-directory: ${{ env.PROJECT_DIR }}
-        run: |
-          set -e
-          if npm run | grep -qE ' build'; then
-            npm run build
-          else
-            echo "No build script found, skipping build"
-          fi
-
-      - name: Ensure Android platform exists
-        working-directory: ${{ env.PROJECT_DIR }}
-        run: |
-          set -e
-          if [ ! -d "android" ]; then
-            npx cap add android
-          else
-            echo "android/ already exists"
-          fi
-
-      - name: Sync Capacitor
-        working-directory: ${{ env.PROJECT_DIR }}
-        run: |
-          set -e
-          npx cap sync android
-
-      - name: Restore keystore from secret
-        working-directory: ${{ env.ANDROID_DIR }}
+      - name: Restore keystore + prepare paths
+        working-directory: android
         env:
           ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
         run: |
           set -e
-          if [ -z "${ANDROID_KEYSTORE_B64:-}" ]; then
-            echo "ERROR: Missing secret ANDROID_KEYSTORE_B64"
+          if [ -z "$ANDROID_KEYSTORE_B64" ]; then
+            echo "ERROR: Secret ANDROID_KEYSTORE_B64 is missing/empty"
             exit 1
           fi
+
           echo "$ANDROID_KEYSTORE_B64" | tr -d '\n\r ' | base64 -d > rmpm-release.keystore
           test -f rmpm-release.keystore
-          echo "Keystore restored: $(ls -la rmpm-release.keystore)"
+          ls -lah rmpm-release.keystore
 
-      - name: Write keystore.properties
-        working-directory: ${{ env.ANDROID_DIR }}
+      - name: Build SIGNED Release APK
+        working-directory: android
         env:
-          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
         run: |
           set -e
-          cat > keystore.properties <<EOF
-          storeFile=rmpm-release.keystore
-          storePassword=${ANDROID_KEYSTORE_PASSWORD}
-          keyAlias=${ANDROID_KEY_ALIAS}
-          keyPassword=${ANDROID_KEY_PASSWORD}
-          EOF
-          sed -E 's/(storePassword=).+/\1***hidden***/; s/(keyPassword=).+/\1***hidden***/' keystore.properties
+          chmod +x ./gradlew
 
-      - name: Build Signed Release APK
-        working-directory: ${{ env.ANDROID_DIR }}
-        run: |
-          set -e
-          chmod +x gradlew
-          ./gradlew assembleRelease
-
-      - name: Find release APK
-        id: apk
-        working-directory: ${{ env.ANDROID_DIR }}
-        run: |
-          set -e
-          APK_PATH=$(ls -1 app/build/outputs/apk/release/*.apk 2>/dev/null | head -n 1 || true)
-          if [ -z "$APK_PATH" ]; then
-            echo "ERROR: Release APK not found. Listing outputs:"
-            find app/build/outputs -maxdepth 6 -type f | sed 's|^| - |'
+          if [ -z "$STORE_PASSWORD" ] || [ -z "$KEY_PASSWORD" ] || [ -z "$KEY_ALIAS" ]; then
+            echo "ERROR: One of secrets is missing: ANDROID_KEYSTORE_PASSWORD / ANDROID_KEY_PASSWORD / ANDROID_KEY_ALIAS"
             exit 1
           fi
-          echo "APK_PATH=$APK_PATH" >> $GITHUB_OUTPUT
-          echo "Found APK: $APK_PATH"
 
-      - name: Upload Signed Release APK
+          ./gradlew --no-daemon clean assembleRelease \
+            -Pandroid.injected.signing.store.file="$(pwd)/rmpm-release.keystore" \
+            -Pandroid.injected.signing.store.password="$STORE_PASSWORD" \
+            -Pandroid.injected.signing.key.alias="$KEY_ALIAS" \
+            -Pandroid.injected.signing.key.password="$KEY_PASSWORD"
+
+      - name: Upload Release APK
         uses: actions/upload-artifact@v4
         with:
-          name: rmpm-signed-release-apk
-          path: ${{ env.ANDROID_DIR }}/${{ steps.apk.outputs.APK_PATH }}
+          name: app-release-apk
+          path: android/app/build/outputs/apk/release/*.apk
