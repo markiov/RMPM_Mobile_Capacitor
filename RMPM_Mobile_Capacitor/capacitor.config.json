@@ -1,9 +1,0 @@
-{
-  "appId": "site.amresidences.play",
-  "appName": "Rich Man Poor Man",
-  "webDir": "src",
-  "server": {
-    "url": "https://play.amresidences.site",
-    "cleartext": false
-  }
-}
