@@ -36,10 +36,10 @@ jobs:
 
       - name: Sync Capacitor
         working-directory: RMPM_Mobile_Capacitor
-        run: npx cap sync android
+        run: npx cap sync android --project android
 
       - name: Decode keystore
-        working-directory: RMPM_Mobile_Capacitor/android
+        working-directory: android
         env:
           ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
         run: |
@@ -116,4 +116,4 @@ if (keystorePropertiesFile.exists()) {\
         uses: actions/upload-artifact@v4
         with:
           name: app-release-apk
-          path: RMPM_Mobile_Capacitor/android/app/build/outputs/apk/release/app-release.apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
