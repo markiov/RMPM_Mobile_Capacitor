@@ -29,7 +29,7 @@ jobs:
       - name: Set project paths
         run: |
           set -e
-          PROJECT_DIR="RMPM_Mobile_Capacitor"
+          PROJECT_DIR="."
 
           if [ ! -f "$PROJECT_DIR/package.json" ]; then
             echo "ERROR: Expected $PROJECT_DIR/package.json not found."
@@ -41,7 +41,7 @@ jobs:
           fi
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> $GITHUB_ENV
-          echo "ANDROID_DIR=$PROJECT_DIR/android" >> $GITHUB_ENV
+          echo "ANDROID_DIR=android" >> $GITHUB_ENV
 
       - name: Install deps
         working-directory: ${{ env.PROJECT_DIR }}
