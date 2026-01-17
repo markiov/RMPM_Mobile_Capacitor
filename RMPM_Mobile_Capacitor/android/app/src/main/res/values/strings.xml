@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Rich Man Poor Man</string>
+    <string name="title_activity_main">Rich Man Poor Man</string>
+    <string name="package_name">site.amresidences.play</string>
+    <string name="custom_url_scheme">site.amresidences.play</string>
+</resources>
