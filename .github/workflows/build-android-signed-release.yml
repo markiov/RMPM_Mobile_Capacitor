@@ -17,11 +17,7 @@ jobs:
           distribution: temurin
           java-version: 17
 
-      # (optioneel) gradle cache voor snelheid
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v3
-
-      - name: Restore keystore + prepare paths
+      - name: Restore keystore
         working-directory: android
         env:
           ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
@@ -47,7 +43,7 @@ jobs:
           chmod +x ./gradlew
 
           if [ -z "$STORE_PASSWORD" ] || [ -z "$KEY_PASSWORD" ] || [ -z "$KEY_ALIAS" ]; then
-            echo "ERROR: One of secrets is missing: ANDROID_KEYSTORE_PASSWORD / ANDROID_KEY_PASSWORD / ANDROID_KEY_ALIAS"
+            echo "ERROR: Missing one of secrets: ANDROID_KEYSTORE_PASSWORD / ANDROID_KEY_PASSWORD / ANDROID_KEY_ALIAS"
             exit 1
           fi
 
