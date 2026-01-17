@@ -1,0 +1,133 @@
+name: Build Android Signed Release APK
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # --- IMPORTANT: set this to the folder that contains package.json ---
+      - name: Set project paths
+        run: |
+          set -e
+          PROJECT_DIR="RMPM_Mobile_Capacitor"
+
+          if [ ! -f "$PROJECT_DIR/package.json" ]; then
+            echo "ERROR: Expected $PROJECT_DIR/package.json not found."
+            echo "Repo root contains:"
+            ls -la
+            echo ""
+            echo "If your package.json is in repo root, set PROJECT_DIR='.' in this workflow."
+            exit 1
+          fi
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> $GITHUB_ENV
+          echo "ANDROID_DIR=$PROJECT_DIR/android" >> $GITHUB_ENV
+
+      - name: Install deps
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          set -e
+          npm ci || npm install
+
+      - name: Build web (optional)
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          set -e
+          if npm run | grep -qE ' build'; then
+            npm run build
+          else
+            echo "No build script found, skipping build"
+          fi
+
+      - name: Ensure Android platform exists
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          set -e
+          if [ ! -d "android" ]; then
+            npx cap add android
+          else
+            echo "android/ already exists"
+          fi
+
+      - name: Sync Capacitor
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          set -e
+          npx cap sync android
+
+      - name: Restore keystore from secret
+        working-directory: ${{ env.ANDROID_DIR }}
+        env:
+          ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+        run: |
+          set -e
+          if [ -z "${ANDROID_KEYSTORE_B64:-}" ]; then
+            echo "ERROR: Missing secret ANDROID_KEYSTORE_B64"
+            exit 1
+          fi
+          echo "$ANDROID_KEYSTORE_B64" | tr -d '\n\r ' | base64 -d > rmpm-release.keystore
+          test -f rmpm-release.keystore
+          echo "Keystore restored: $(ls -la rmpm-release.keystore)"
+
+      - name: Write keystore.properties
+        working-directory: ${{ env.ANDROID_DIR }}
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -e
+          cat > keystore.properties <<EOF
+          storeFile=rmpm-release.keystore
+          storePassword=${ANDROID_KEYSTORE_PASSWORD}
+          keyAlias=${ANDROID_KEY_ALIAS}
+          keyPassword=${ANDROID_KEY_PASSWORD}
+          EOF
+          sed -E 's/(storePassword=).+/\1***hidden***/; s/(keyPassword=).+/\1***hidden***/' keystore.properties
+
+      - name: Build Signed Release APK
+        working-directory: ${{ env.ANDROID_DIR }}
+        run: |
+          set -e
+          chmod +x gradlew
+          ./gradlew assembleRelease
+
+      - name: Find release APK
+        id: apk
+        working-directory: ${{ env.ANDROID_DIR }}
+        run: |
+          set -e
+          APK_PATH=$(ls -1 app/build/outputs/apk/release/*.apk 2>/dev/null | head -n 1 || true)
+          if [ -z "$APK_PATH" ]; then
+            echo "ERROR: Release APK not found. Listing outputs:"
+            find app/build/outputs -maxdepth 6 -type f | sed 's|^| - |'
+            exit 1
+          fi
+          echo "APK_PATH=$APK_PATH" >> $GITHUB_OUTPUT
+          echo "Found APK: $APK_PATH"
+
+      - name: Upload Signed Release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: rmpm-signed-release-apk
+          path: ${{ env.ANDROID_DIR }}/${{ steps.apk.outputs.APK_PATH }}
