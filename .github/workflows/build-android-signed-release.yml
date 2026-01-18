@@ -52,6 +52,27 @@ jobs:
           echo "Using PROJECT_DIR=$PROJECT_DIR"
           echo "Using ANDROID_DIR=$ANDROID_DIR"
 
+      # ✅ FIX: installeer Android build-tools zodat zipalign bestaat
+      - name: Install Android build-tools (zipalign)
+        shell: bash
+        run: |
+          set -e
+          ANDROID_SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME}}"
+          echo "ANDROID_SDK=$ANDROID_SDK"
+          SDKMANAGER="$ANDROID_SDK/cmdline-tools/latest/bin/sdkmanager"
+
+          if [ ! -x "$SDKMANAGER" ]; then
+            echo "ERROR: sdkmanager not found at $SDKMANAGER"
+            echo "Available in $ANDROID_SDK:"
+            ls -la "$ANDROID_SDK" || true
+            exit 1
+          fi
+
+          yes | "$SDKMANAGER" --install "platform-tools" "build-tools;34.0.0"
+          test -f "$ANDROID_SDK/build-tools/34.0.0/zipalign"
+          test -f "$ANDROID_SDK/build-tools/34.0.0/apksigner"
+          echo "$ANDROID_SDK/build-tools/34.0.0" >> $GITHUB_PATH
+
       - name: Install deps
         working-directory: ${{ env.PROJECT_DIR }}
         run: npm install
@@ -60,13 +81,10 @@ jobs:
         working-directory: ${{ env.PROJECT_DIR }}
         run: npm run build || echo "no build script, continuing"
 
-      # Zorg dat Capacitor Android correct synced is (belangrijk voor :capacitor-android error)
       - name: Sync Capacitor Android
         working-directory: ${{ env.PROJECT_DIR }}
-        run: |
-          npx cap sync android
+        run: npx cap sync android
 
-      # Keystore terugzetten + properties schrijven
       - name: Restore keystore + write keystore.properties
         shell: bash
         run: |
@@ -77,11 +95,9 @@ jobs:
           test -n "${{ secrets.ANDROID_KEY_ALIAS }}" || (echo "ERROR: ANDROID_KEY_ALIAS secret is empty" && exit 1)
           test -n "${{ secrets.ANDROID_KEY_PASSWORD }}" || (echo "ERROR: ANDROID_KEY_PASSWORD secret is empty" && exit 1)
 
-          # decode keystore naar android/app/
           echo "${{ secrets.ANDROID_KEYSTORE_B64 }}" | tr -d '\n\r' | base64 -d > "${{ env.ANDROID_DIR }}/app/rmpm-release.keystore"
           test -f "${{ env.ANDROID_DIR }}/app/rmpm-release.keystore"
 
-          # keystore.properties in android/
           cat > "${{ env.ANDROID_DIR }}/keystore.properties" <<EOF
           storeFile=app/rmpm-release.keystore
           storePassword=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
@@ -89,18 +105,14 @@ jobs:
           keyPassword=${{ secrets.ANDROID_KEY_PASSWORD }}
           EOF
 
-          # mask niet nodig, GitHub secrets zijn al gemaskeerd in logs
-
       - name: Make gradlew executable
         working-directory: ${{ env.ANDROID_DIR }}
         run: chmod +x ./gradlew
 
-      # Build release (unsigned output wordt straks gesigned door action)
       - name: Build Release APK (assembleRelease)
         working-directory: ${{ env.ANDROID_DIR }}
         run: ./gradlew clean assembleRelease
 
-      # Sign de release APKs in de release output folder
       - name: Sign release APK
         uses: r0adkll/sign-android-release@v1
         with:
