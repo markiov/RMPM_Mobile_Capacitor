@@ -30,25 +30,18 @@ jobs:
           ls -la
 
           if [ -f "RMPM_Mobile_Capacitor/package.json" ]; then
-            echo "PROJECT_DIR=RMPM_Mobile_Capacitor" >> $GITHUB_ENV
+            echo "PROJECT_DIR=RMPM_Mobile_Capacitor" >> "$GITHUB_ENV"
+            echo "ANDROID_DIR=RMPM_Mobile_Capacitor/android" >> "$GITHUB_ENV"
           elif [ -f "package.json" ]; then
-            echo "PROJECT_DIR=." >> $GITHUB_ENV
+            echo "PROJECT_DIR=." >> "$GITHUB_ENV"
+            echo "ANDROID_DIR=android" >> "$GITHUB_ENV"
           else
             echo "ERROR: package.json not found in repo root or RMPM_Mobile_Capacitor/"
             exit 1
           fi
 
-          echo "Chosen PROJECT_DIR=$PROJECT_DIR"
-          ls -la "$PROJECT_DIR"
-
-          if [ ! -d "$PROJECT_DIR/android" ]; then
-            echo "ERROR: Android folder not found at $PROJECT_DIR/android"
-            echo "Found folders:"
-            find "$PROJECT_DIR" -maxdepth 2 -type d -print
-            exit 1
-          fi
-
-          echo "ANDROID_DIR=$PROJECT_DIR/android" >> $GITHUB_ENV
+          echo "PROJECT_DIR resolved to: $(cat $GITHUB_ENV | grep PROJECT_DIR | cut -d= -f2)"
+          echo "ANDROID_DIR resolved to: $(cat $GITHUB_ENV | grep ANDROID_DIR | cut -d= -f2)"
 
       - name: Install deps
         working-directory: ${{ env.PROJECT_DIR }}
@@ -82,15 +75,16 @@ jobs:
           test -n "$ANDROID_KEY_ALIAS" || (echo "ERROR: ANDROID_KEY_ALIAS secret is empty" && exit 1)
           test -n "$ANDROID_KEY_PASSWORD" || (echo "ERROR: ANDROID_KEY_PASSWORD secret is empty" && exit 1)
 
+          # decode keystore into android/app/
+          mkdir -p app
           echo "$ANDROID_KEYSTORE_B64" | tr -d '\n\r' | base64 -d > app/rmpm-release.keystore
           test -f app/rmpm-release.keystore
 
-          cat > keystore.properties <<EOF
-storeFile=rmpm-release.keystore
-storePassword=$ANDROID_KEYSTORE_PASSWORD
-keyAlias=$ANDROID_KEY_ALIAS
-keyPassword=$ANDROID_KEY_PASSWORD
-EOF
+          # write keystore.properties (NO heredoc -> avoids YAML parser issues)
+          printf "storeFile=rmpm-release.keystore\n" > keystore.properties
+          printf "storePassword=%s\n" "$ANDROID_KEYSTORE_PASSWORD" >> keystore.properties
+          printf "keyAlias=%s\n" "$ANDROID_KEY_ALIAS" >> keystore.properties
+          printf "keyPassword=%s\n" "$ANDROID_KEY_PASSWORD" >> keystore.properties
 
           # show file but hide passwords
           sed -i 's/storePassword=.*/storePassword=***hidden***/' keystore.properties
@@ -105,7 +99,7 @@ EOF
         working-directory: ${{ env.ANDROID_DIR }}
         run: ./gradlew clean assembleRelease
 
-      - name: Install Android build-tools (zipalign)
+      - name: Install Android build-tools (zipalign + apksigner)
         shell: bash
         run: |
           set -e
@@ -115,7 +109,6 @@ EOF
 
           if [ ! -x "$SDKMANAGER" ]; then
             echo "ERROR: sdkmanager not found at $SDKMANAGER"
-            echo "Available in $ANDROID_SDK:"
             ls -la "$ANDROID_SDK" || true
             exit 1
           fi
@@ -130,7 +123,7 @@ EOF
 
           test -f "$ANDROID_SDK/build-tools/34.0.0/zipalign"
           test -f "$ANDROID_SDK/build-tools/34.0.0/apksigner"
-          echo "$ANDROID_SDK/build-tools/34.0.0" >> $GITHUB_PATH
+          echo "$ANDROID_SDK/build-tools/34.0.0" >> "$GITHUB_PATH"
 
       - name: Find unsigned release APK
         id: find_apk
@@ -145,7 +138,7 @@ EOF
             ls -la "${{ env.ANDROID_DIR }}/app/build/outputs/apk/release" || true
             exit 1
           fi
-          echo "apk_path=$APK_PATH" >> $GITHUB_OUTPUT
+          echo "apk_path=$APK_PATH" >> "$GITHUB_OUTPUT"
           echo "Found: $APK_PATH"
 
       - name: Sign release APK
@@ -160,7 +153,6 @@ EOF
           UNSIGNED="${{ steps.find_apk.outputs.apk_path }}"
           SIGNED="${{ env.ANDROID_DIR }}/app/build/outputs/apk/release/app-release-signed.apk"
 
-          echo "Signing: $UNSIGNED"
           apksigner sign \
             --ks app/rmpm-release.keystore \
             --ks-pass "pass:$ANDROID_KEYSTORE_PASSWORD" \
@@ -169,14 +161,11 @@ EOF
             --out "$SIGNED" \
             "$UNSIGNED"
 
-          echo "Verify signature:"
           apksigner verify --verbose "$SIGNED"
 
-          echo "Zipalign:"
           zipalign -v -p 4 "$SIGNED" "${SIGNED}.aligned"
           mv -f "${SIGNED}.aligned" "$SIGNED"
 
-          echo "Final signed apk:"
           ls -la "$SIGNED"
 
       - name: Upload Release APK (SIGNED)
