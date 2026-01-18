@@ -40,8 +40,8 @@ jobs:
             exit 1
           fi
 
-          echo "PROJECT_DIR resolved to: $(cat $GITHUB_ENV | grep PROJECT_DIR | cut -d= -f2)"
-          echo "ANDROID_DIR resolved to: $(cat $GITHUB_ENV | grep ANDROID_DIR | cut -d= -f2)"
+          echo "Resolved env:"
+          cat "$GITHUB_ENV" | grep -E "PROJECT_DIR|ANDROID_DIR" || true
 
       - name: Install deps
         working-directory: ${{ env.PROJECT_DIR }}
@@ -75,18 +75,17 @@ jobs:
           test -n "$ANDROID_KEY_ALIAS" || (echo "ERROR: ANDROID_KEY_ALIAS secret is empty" && exit 1)
           test -n "$ANDROID_KEY_PASSWORD" || (echo "ERROR: ANDROID_KEY_PASSWORD secret is empty" && exit 1)
 
-          # decode keystore into android/app/
           mkdir -p app
           echo "$ANDROID_KEYSTORE_B64" | tr -d '\n\r' | base64 -d > app/rmpm-release.keystore
           test -f app/rmpm-release.keystore
 
-          # write keystore.properties (NO heredoc -> avoids YAML parser issues)
+          # keystore.properties in ANDROID_DIR root
           printf "storeFile=rmpm-release.keystore\n" > keystore.properties
           printf "storePassword=%s\n" "$ANDROID_KEYSTORE_PASSWORD" >> keystore.properties
           printf "keyAlias=%s\n" "$ANDROID_KEY_ALIAS" >> keystore.properties
           printf "keyPassword=%s\n" "$ANDROID_KEY_PASSWORD" >> keystore.properties
 
-          # show file but hide passwords
+          # show but hide passwords
           sed -i 's/storePassword=.*/storePassword=***hidden***/' keystore.properties
           sed -i 's/keyPassword=.*/keyPassword=***hidden***/' keystore.properties
           cat keystore.properties
@@ -115,6 +114,7 @@ jobs:
 
           "$SDKMANAGER" --licenses || true
 
+          # Install recent build-tools (34.0.0 has zipalign + apksigner)
           for i in 1 2 3; do
             echo "Install attempt $i..."
             "$SDKMANAGER" --install "platform-tools" "build-tools;34.0.0" && break
@@ -125,23 +125,33 @@ jobs:
           test -f "$ANDROID_SDK/build-tools/34.0.0/apksigner"
           echo "$ANDROID_SDK/build-tools/34.0.0" >> "$GITHUB_PATH"
 
-      - name: Find unsigned release APK
-        id: find_apk
+      - name: Locate release APK (any name)
+        id: locate
         shell: bash
         run: |
           set -e
-          APK_PATH="${{ env.ANDROID_DIR }}/app/build/outputs/apk/release/app-release-unsigned.apk"
-          if [ ! -f "$APK_PATH" ]; then
-            echo "ERROR: Unsigned APK not found at: $APK_PATH"
-            echo "Listing outputs:"
-            ls -la "${{ env.ANDROID_DIR }}/app/build/outputs/apk" || true
-            ls -la "${{ env.ANDROID_DIR }}/app/build/outputs/apk/release" || true
+          OUTDIR="${{ env.ANDROID_DIR }}/app/build/outputs/apk/release"
+          echo "Listing: $OUTDIR"
+          ls -la "$OUTDIR" || true
+
+          # Prefer unsigned if it exists, otherwise take any release apk
+          APK=""
+          if [ -f "$OUTDIR/app-release-unsigned.apk" ]; then
+            APK="$OUTDIR/app-release-unsigned.apk"
+          else
+            APK="$(ls -1 "$OUTDIR"/*.apk 2>/dev/null | head -n 1 || true)"
+          fi
+
+          if [ -z "$APK" ] || [ ! -f "$APK" ]; then
+            echo "ERROR: No release APK found in $OUTDIR"
             exit 1
           fi
-          echo "apk_path=$APK_PATH" >> "$GITHUB_OUTPUT"
-          echo "Found: $APK_PATH"
 
-      - name: Sign release APK
+          echo "Found APK: $APK"
+          echo "apk_path=$APK" >> "$GITHUB_OUTPUT"
+
+      - name: Sign if needed + verify + zipalign
+        id: sign_or_verify
         working-directory: ${{ env.ANDROID_DIR }}
         env:
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
@@ -150,32 +160,46 @@ jobs:
         shell: bash
         run: |
           set -e
-          UNSIGNED="${{ steps.find_apk.outputs.apk_path }}"
-          SIGNED="${{ env.ANDROID_DIR }}/app/build/outputs/apk/release/app-release-signed.apk"
 
-          apksigner sign \
-            --ks app/rmpm-release.keystore \
-            --ks-pass "pass:$ANDROID_KEYSTORE_PASSWORD" \
-            --ks-key-alias "$ANDROID_KEY_ALIAS" \
-            --key-pass "pass:$ANDROID_KEY_PASSWORD" \
-            --out "$SIGNED" \
-            "$UNSIGNED"
+          INAPK="${{ steps.locate.outputs.apk_path }}"
+          OUTDIR="${{ env.ANDROID_DIR }}/app/build/outputs/apk/release"
+          SIGNED="$OUTDIR/app-release-signed.apk"
 
+          echo "Input APK: $INAPK"
+
+          # Check if already signed (apksigner verify returns 0 if valid)
+          if apksigner verify --verbose "$INAPK" >/dev/null 2>&1; then
+            echo "APK already signed -> will use it as signed output"
+            cp -f "$INAPK" "$SIGNED"
+          else
+            echo "APK not signed -> signing now..."
+            apksigner sign \
+              --ks app/rmpm-release.keystore \
+              --ks-pass "pass:$ANDROID_KEYSTORE_PASSWORD" \
+              --ks-key-alias "$ANDROID_KEY_ALIAS" \
+              --key-pass "pass:$ANDROID_KEY_PASSWORD" \
+              --out "$SIGNED" \
+              "$INAPK"
+          fi
+
+          echo "Verify signed:"
           apksigner verify --verbose "$SIGNED"
 
+          echo "Zipalign:"
           zipalign -v -p 4 "$SIGNED" "${SIGNED}.aligned"
           mv -f "${SIGNED}.aligned" "$SIGNED"
 
           ls -la "$SIGNED"
+          echo "signed_apk=$SIGNED" >> "$GITHUB_OUTPUT"
 
       - name: Upload Release APK (SIGNED)
         uses: actions/upload-artifact@v4
         with:
           name: app-release-signed
-          path: RMPM_Mobile_Capacitor/android/app/build/outputs/apk/release/app-release-signed.apk
+          path: ${{ steps.sign_or_verify.outputs.signed_apk }}
 
-      - name: Upload Release APK (UNSIGNED) (debugging)
+      - name: Upload Input Release APK (for debugging)
         uses: actions/upload-artifact@v4
         with:
-          name: app-release-unsigned
-          path: RMPM_Mobile_Capacitor/android/app/build/outputs/apk/release/app-release-unsigned.apk
+          name: release-apk-input
+          path: ${{ steps.locate.outputs.apk_path }}
